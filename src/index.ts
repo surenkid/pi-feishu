@@ -288,41 +288,76 @@ export default function (pi: ExtensionAPI) {
     queue.processing = true;
     const item = queue.queue.shift()!;
 
-    flashStatus(`飞书: 📩 ${item.text.substring(0, 20)}${item.text.length > 20 ? "..." : ""}`);
+    try {
+      flashStatus(`飞书: 📩 ${item.text.substring(0, 20)}${item.text.length > 20 ? "..." : ""}`);
 
-    // 下载入站媒体
-    let resourceDescription = "";
-    for (const res of item.resources) {
-      const localPath = await client!.downloadResource(
-        item.msgId,
-        res.fileKey,
-        res.type,
-        res.fileName,
-      );
-      if (localPath) {
+      // 下载入站媒体，将图片转为 base64 ImageContent 供多模态使用
+      let resourceDescription = "";
+      const imageParts: Array<{ type: "image"; data: string; mimeType: string }> = [];
+
+      for (const res of item.resources) {
+        const localPath = await client!.downloadResource(
+          item.msgId,
+          res.fileKey,
+          res.type,
+          res.fileName,
+        );
+
         const typeLabel =
           res.type === "image" ? "图片" :
           res.type === "audio" ? "语音" :
           res.type === "video" ? "视频" : "文件";
-        resourceDescription += `\n[收到${typeLabel}: ${localPath}]`;
+
+        if (localPath) {
+          if (res.type === "image") {
+            // 图片：读取为 base64，直接作为多模态内容发送给 LLM
+            try {
+              const imageBuffer = readFileSync(localPath);
+              const base64Data = imageBuffer.toString("base64");
+              const mimeType = detectImageMimeType(localPath);
+              imageParts.push({ type: "image", data: base64Data, mimeType });
+            } catch (err) {
+              console.warn(`[pi-feishu] 读取图片失败 ${localPath}:`, err);
+              resourceDescription += `\n[收到${typeLabel}但读取失败: ${localPath}]`;
+            }
+          } else {
+            resourceDescription += `\n[收到${typeLabel}: ${localPath}]`;
+          }
+        } else {
+          resourceDescription += `\n[收到${typeLabel}但下载失败(key=${res.fileKey})，请告知用户重新发送]`;
+        }
       }
+
+      // 初始化聊天状态
+      chatStates.set(chatId, {
+        chatId,
+        userMsgId: item.msgId,
+        progressMsgId: null,
+        progressCreating: false,
+        toolEntries: [],
+      });
+
+      // 添加 Typing Reaction
+      await client!.startTyping(chatId, item.msgId);
+
+      // 发送给 Pi：有图片时使用多模态格式，否则纯文本
+      const textContent = item.text + (resourceDescription ? "\n" + resourceDescription : "");
+      if (imageParts.length > 0) {
+        const contentParts: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+          { type: "text", text: textContent },
+          ...imageParts,
+        ];
+        pi.sendUserMessage(contentParts);
+      } else {
+        pi.sendUserMessage(textContent);
+      }
+    } catch (err) {
+      // 出错时 agent_end 不会触发，需主动复位队列，防止永久卡死
+      console.warn(`[pi-feishu] dequeueAndProcess error:`, err);
+      client?.sendMessage(chatId, `处理消息时出错: ${err}`, item.msgId).catch(() => {});
+      const q = chatQueues.get(chatId);
+      if (q) q.processing = false;
     }
-
-    // 初始化聊天状态
-    chatStates.set(chatId, {
-      chatId,
-      userMsgId: item.msgId,
-      progressMsgId: null,
-      progressCreating: false,
-      toolEntries: [],
-    });
-
-    // 添加 Typing Reaction
-    await client!.startTyping(chatId, item.msgId);
-
-    // 发送给 Pi
-    const fullContent = item.text + (resourceDescription ? "\n" + resourceDescription : "");
-    pi.sendUserMessage(fullContent);
   }
 
   // ─── 斜杠命令处理 ──────────────────────────────────────
@@ -958,6 +993,26 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ─── 工具函数 ────────────────────────────────────────
+
+  /** 根据文件扩展名检测图片 MIME 类型 */
+  function detectImageMimeType(filePath: string): string {
+    const ext = filePath.toLowerCase().split(".").pop() ?? "";
+    switch (ext) {
+      case "png":
+        return "image/png";
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      case "gif":
+        return "image/gif";
+      case "webp":
+        return "image/webp";
+      case "svg":
+        return "image/svg+xml";
+      default:
+        return "image/png"; // 飞书图片默认为 PNG 格式
+    }
+  }
 
   /**
    * Markdown 标题降级：所有出站文本的标题层级 +2，最小 H6。

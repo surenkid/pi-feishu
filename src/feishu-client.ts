@@ -34,6 +34,8 @@ const DEDUP_MAX_ENTRIES = 5000;
 const DEDUP_SWEEP_INTERVAL = 5 * 60 * 1000;
 /** 消息过期判定（30 分钟） */
 const MESSAGE_EXPIRY_MS = 30 * 60 * 60 * 1000;
+/** 资源下载超时（30 秒） */
+const RESOURCE_DOWNLOAD_TIMEOUT_MS = 30 * 1000;
 /** 媒体文件临时目录 */
 const MEDIA_TEMP_DIR = join(tmpdir(), "feishu-media");
 /** 飞书 Reaction emoji 类型 */
@@ -172,7 +174,7 @@ export class FeishuClient {
         appId: this.config.appId,
         appSecret: this.config.appSecret,
         domain,
-        loggerLevel: Lark.LoggerLevel.info,
+        loggerLevel: Lark.LoggerLevel.warn, // 过滤 SDK 内部 info（如 '[ws]', 'ws client ready'）
         autoReconnect: true,
         handshakeTimeoutMs: 15000,
         wsConfig: {
@@ -324,10 +326,15 @@ export class FeishuClient {
     try {
       _log(`Downloading resource: ${fileKey} from message ${messageId}`);
 
-      const resp = await this.client.im.messageResource.get({
+      // 超时保护：防止 API 无响应时队列永久卡死
+      const downloadPromise = this.client.im.messageResource.get({
         path: { message_id: messageId, file_key: fileKey },
         params: { type: resourceType as any },
       });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Download timeout after ${RESOURCE_DOWNLOAD_TIMEOUT_MS}ms`)), RESOURCE_DOWNLOAD_TIMEOUT_MS)
+      );
+      const resp = await Promise.race([downloadPromise, timeoutPromise]);
 
       if (!resp) return null;
 
@@ -559,7 +566,12 @@ export class FeishuClient {
 
       case "post": {
         const parts: string[] = [];
-        const locale = parsed?.zh_cn ?? parsed?.en_us ?? parsed?.ja_jp;
+        // 尝试所有可能的 locale key
+        const KNOWN_LOCALES = ["zh_cn", "en_us", "ja_jp", "ko_kr", "de_de", "fr_fr", "ru_ru", "vi_vn", "id_id", "ms_my", "th_th", "es_es"];
+        const matchedLocaleKey = KNOWN_LOCALES.find(k => parsed?.[k]) ?? Object.keys(parsed).find(k => parsed[k]?.content);
+        // Fallback: 若 parsed 自身带 content（无 locale 嵌套），直接当作 locale 对象
+        const locale = matchedLocaleKey ? parsed[matchedLocaleKey] : (parsed?.content ? parsed : undefined);
+
         if (locale?.title) parts.push(locale.title);
         if (Array.isArray(locale?.content)) {
           for (const row of locale.content) {
@@ -569,11 +581,20 @@ export class FeishuClient {
                 else if (elem?.tag === "a" && elem.text) parts.push(elem.text);
                 else if (elem?.tag === "md" && elem.text) parts.push(elem.text);
                 else if (elem?.tag === "at") parts.push(elem.user_id ?? "");
+                else if (elem?.tag === "emotion") parts.push(elem.emoji ?? "");
+                else if (elem?.tag === "quote") parts.push("[引用]");
                 else if (elem?.tag === "img") {
                   parts.push(`[图片]`);
-                  if (elem.image_key) {
-                    resources.push({ type: "image", fileKey: elem.image_key });
+                  // 兼容多种 key 名称
+                  const imgKey = elem.image_key || elem.img_key || elem.file_key;
+                  if (imgKey) {
+                    resources.push({ type: "image", fileKey: imgKey });
+                  } else {
+                    _warn(`Post img element has no image_key! elem keys: [${Object.keys(elem).join(",")}]`);
                   }
+                }
+                else {
+                  _log(`Post: unhandled tag="${elem?.tag}", elem keys=[${Object.keys(elem ?? {}).join(",")}]`);
                 }
               }
             }
@@ -587,6 +608,8 @@ export class FeishuClient {
         text = "[图片]";
         if (parsed?.image_key) {
           resources.push({ type: "image", fileKey: parsed.image_key });
+        } else {
+          _warn(`Image message has no image_key! keys: [${Object.keys(parsed).join(",")}]`);
         }
         break;
 
