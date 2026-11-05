@@ -35,7 +35,7 @@ import type {
   ExtensionContext,
   ExtensionCommandContext,
   TurnEndEvent,
-  AgentEndEvent,
+  AgentSettledEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
 import { readFileSync, existsSync } from "node:fs";
@@ -279,8 +279,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Pi 正忙（压缩中/流式中）→ 不出队，保持 processing=false 等空闲时再触发
-    if (ctxRef && !ctxRef.isIdle()) {
+    // Pi 只有一个会话；下载资源或添加 Typing 时也必须保留当前聊天的占用。
+    if ((ctxRef && !ctxRef.isIdle()) ||
+        [...chatQueues.values()].some((pending) => pending.processing)) {
       queue.processing = false;
       return;
     }
@@ -552,33 +553,36 @@ export default function (pi: ExtensionAPI) {
     flashStatus(`飞书: 📤 推送中 (${textContent.length}字)`);
   });
 
-  // ─── agent_end → 清理 + 处理下一条排队消息 ──────────
+  // ─── agent_settled → 清理 + 处理下一条排队消息 ──────────
 
-  pi.on("agent_end", (_event: AgentEndEvent) => {
+  // agent_end 后 Pi 仍可能重试或压缩；最终空闲后才能清理回复路由并出队。
+  pi.on("agent_settled", (_event: AgentSettledEvent) => {
     if (!client || client.getStatus() !== "connected") return;
     const state = findActiveState();
-    if (!state) return;
 
-    const chatId = state.chatId;
+    if (state) {
+      const chatId = state.chatId;
 
-    // 移除 Typing Reaction
-    client.stopTyping(chatId, true).catch(() => {});
+      // 移除 Typing Reaction
+      client.stopTyping(chatId, true).catch(() => {});
 
-    // 清理当前状态
-    chatStates.delete(chatId);
+      // 清理当前状态
+      chatStates.delete(chatId);
 
-    // 刷新所有队列（包括当前聊天）
-    const queue = chatQueues.get(chatId);
-    if (queue) queue.processing = false;
+      const queue = chatQueues.get(chatId);
+      if (queue) queue.processing = false;
+      flashStatus("飞书: ✅ 完成");
+    }
+
+    // 非飞书发起的任务结束后，也可能有等待 Pi 空闲的飞书消息。
     flushAllQueues();
-    flashStatus("飞书: ✅ 完成");
   });
 
   // ─── Pi 空闲时刷新所有队列 ─────────────────────────────
 
   /**
    * 检查所有聊天的队列，Pi 空闲时尝试处理下一条。
-   * 在 agent_end、session_compact、session_start 后调用。
+   * 在 agent_settled、session_compact、session_start 后调用。
    */
   function flushAllQueues(): void {
     if (!client || client.getStatus() !== "connected") return;
