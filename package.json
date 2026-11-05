@@ -34,14 +34,15 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck"
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "prepublishOnly": "npm run typecheck",
+    "test": "vitest run"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.80.5"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
@@ -49,7 +50,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.2",
-    "typescript": "^5.5.0"
+    "@earendil-works/pi-coding-agent": "^0.80.5",
+    "typebox": "^1.1.38",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.12"
   }
 }

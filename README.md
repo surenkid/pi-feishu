@@ -21,6 +21,8 @@
 
 ## 安装
 
+需要 Pi **0.80.5 或更高版本**（队列在 `agent_settled` 最终空闲事件后继续处理）。
+
 ```bash
 pi install npm:pi-feishu
 ```
@@ -129,7 +131,7 @@ Bot:                                    [最终回复]
 | `tool_execution_end` | 更新进度卡片（标记完成/失败） |
 | `turn_end`（含工具调用） | 发送中间文本（回复模式） |
 | `turn_end`（纯文本） | 发送最终回复（新消息） |
-| `agent_end` | 移除 Typing Reaction |
+| `agent_settled` | 最终空闲后移除 Typing Reaction、清理回复路由并处理下一条排队消息 |
 
 ### 注册的 Pi 工具
 
@@ -196,6 +198,7 @@ pi-feishu/
 ```bash
 npm install
 npm run typecheck
+npm test
 pi -e ./src/index.ts --feishu-app-id=YOUR_ID --feishu-app-secret=YOUR_SECRET
 ```
 
